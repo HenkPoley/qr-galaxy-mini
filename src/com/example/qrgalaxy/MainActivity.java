@@ -9,6 +9,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.view.Gravity;
+import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
@@ -38,6 +39,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ca
     private boolean decoding;
     private boolean previewing;
     private String lastResult;
+    private int cameraId = -1;
+    private int displayOrientation = 90;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -124,8 +127,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ca
             return;
         }
         try {
-            camera = Camera.open();
-            camera.setDisplayOrientation(90);
+            cameraId = findBackCameraId();
+            camera = cameraId >= 0 ? Camera.open(cameraId) : Camera.open();
+            displayOrientation = getCameraDisplayOrientation(cameraId);
+            camera.setDisplayOrientation(displayOrientation);
             Camera.Parameters params = camera.getParameters();
             if (params.getSupportedFocusModes() != null
                     && params.getSupportedFocusModes().contains(Camera.Parameters.FOCUS_MODE_AUTO)) {
@@ -153,6 +158,47 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ca
         } catch (IOException ex) {
             Toast.makeText(this, "Could not start camera preview", Toast.LENGTH_LONG).show();
         }
+    }
+
+    private int findBackCameraId() {
+        int count = Camera.getNumberOfCameras();
+        Camera.CameraInfo info = new Camera.CameraInfo();
+        for (int i = 0; i < count; i++) {
+            Camera.getCameraInfo(i, info);
+            if (info.facing == Camera.CameraInfo.CAMERA_FACING_BACK) {
+                return i;
+            }
+        }
+        return count > 0 ? 0 : -1;
+    }
+
+    private int getCameraDisplayOrientation(int id) {
+        if (id < 0) {
+            return 90;
+        }
+        Camera.CameraInfo info = new Camera.CameraInfo();
+        Camera.getCameraInfo(id, info);
+        int rotation = getWindowManager().getDefaultDisplay().getRotation();
+        int degrees = 0;
+        switch (rotation) {
+            case Surface.ROTATION_90:
+                degrees = 90;
+                break;
+            case Surface.ROTATION_180:
+                degrees = 180;
+                break;
+            case Surface.ROTATION_270:
+                degrees = 270;
+                break;
+            case Surface.ROTATION_0:
+            default:
+                degrees = 0;
+                break;
+        }
+        if (info.facing == Camera.CameraInfo.CAMERA_FACING_FRONT) {
+            return (360 - ((info.orientation + degrees) % 360)) % 360;
+        }
+        return (info.orientation - degrees + 360) % 360;
     }
 
     private void requestAutoFocus() {
@@ -234,16 +280,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ca
     }
 
     private Result decode(byte[] data, int width, int height) {
-        byte[] rotated = new byte[data.length];
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                rotated[x * height + height - y - 1] = data[x + y * width];
-            }
-        }
-        int rotatedWidth = height;
-        int rotatedHeight = width;
+        RotatedFrame frame = rotate(data, width, height, displayOrientation);
         PlanarYUVLuminanceSource source = new PlanarYUVLuminanceSource(
-                rotated, rotatedWidth, rotatedHeight, 0, 0, rotatedWidth, rotatedHeight, false);
+                frame.data, frame.width, frame.height, 0, 0, frame.width, frame.height, false);
         BinaryBitmap bitmap = new BinaryBitmap(new HybridBinarizer(source));
         try {
             return reader.decode(bitmap);
@@ -253,6 +292,47 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback, Ca
             return null;
         } finally {
             reader.reset();
+        }
+    }
+
+    private RotatedFrame rotate(byte[] data, int width, int height, int degrees) {
+        if (degrees == 0) {
+            return new RotatedFrame(data, width, height);
+        }
+        byte[] rotated = new byte[data.length];
+        if (degrees == 180) {
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    rotated[(height - y - 1) * width + width - x - 1] = data[y * width + x];
+                }
+            }
+            return new RotatedFrame(rotated, width, height);
+        }
+        if (degrees == 270) {
+            for (int y = 0; y < height; y++) {
+                for (int x = 0; x < width; x++) {
+                    rotated[(width - x - 1) * height + y] = data[y * width + x];
+                }
+            }
+            return new RotatedFrame(rotated, height, width);
+        }
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                rotated[x * height + height - y - 1] = data[x + y * width];
+            }
+        }
+        return new RotatedFrame(rotated, height, width);
+    }
+
+    private static class RotatedFrame {
+        final byte[] data;
+        final int width;
+        final int height;
+
+        RotatedFrame(byte[] data, int width, int height) {
+            this.data = data;
+            this.width = width;
+            this.height = height;
         }
     }
 
